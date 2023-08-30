@@ -7,8 +7,10 @@ import os
 from telegram import KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, Update, WebAppInfo, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, ConversationHandler, CallbackQueryHandler
 import db_api
+import datetime
 
 ADMIN_ID = 212504240
+ACCEPTANCE_GROUP = -1001951047584
 
 # Enable logging
 logging.basicConfig(
@@ -23,6 +25,7 @@ GIVE_SEARCH, GIVE_CHOOSE_WORKER, GIVE_CHOOSE_REASON = range(6, 9)
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     
     user_status = db_api.getUserStatus(update.effective_user.id)
+    user_status = None
     if user_status:
         if user_status == 'active':
             keyboard = [
@@ -59,7 +62,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 Действуй! Шагни за Горизонт!
         """, 
             reply_markup=ReplyKeyboardMarkup(
-                reply_keyboard, one_time_keyboard=True, resize_keyboard=True
+                reply_keyboard, resize_keyboard=True
             )
         )
         return AUTH
@@ -100,7 +103,7 @@ async def send_auth_message(user_data, context: ContextTypes.DEFAULT_TYPE) -> No
             ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await context.bot.send_message(chat_id=ADMIN_ID, text=f"""Новая регистрация:
+    await context.bot.send_message(chat_id=ACCEPTANCE_GROUP, text=f"""Новая регистрация:
 ФИО: {user_data['fio']}
 ВТС: {user_data['phone']}
 id: {user_data['id']}""", reply_markup=reply_markup)
@@ -113,14 +116,30 @@ async def register_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if fio:
         #уберем пробелы и спецсимволы, сделаем букву каждого слова заглавной для поиска
         context.user_data['reg_fio'] = ' '.join([re.sub(r'[\W\d_]+', '', s.capitalize()) for s in fio['fio'].lower().split()])
+        temp_search = context.user_data['reg_fio'].replace('.', '').split()
+        if len(temp_search) > 1:
+            if len(''.join(temp_search[1:])) < 3:
+                context.user_data['reg_fio'] = ' '.join([temp_search[0], temp_search[1][0]])
         context.user_data['reg_user_id'] = int(user_id)
         context.user_data['reg_message_id'] = query.message.id
-        new_text = query.message.text + '\nВыбрана опция "Зарегистрировать". Выберите работника'
-        await query.edit_message_reply_markup(reply_markup=None)
+        attr_list = ['username', 'first_name', 'last_name']
+        user_info = {k: query.from_user[k] for k in attr_list if hasattr(query.from_user, k)}
+        username = user_info.pop('username', None)
+        if username:
+            user_description = f'@{username}'
+        else:
+            fio = [user_info.pop('first_name', None), user_info.pop('last_name', None)]
+            user_description = ' '.join([elem for elem in fio if elem is not None])
+        new_text = query.message.text + f'\nАдминистратором {user_description} выбрана опция "Зарегистрировать". Информация направлена личным сообщением.'
+        await query.edit_message_text(new_text, reply_markup=None)
+        #await query.edit_message_reply_markup(reply_markup=None)
         context.user_data['reg_workers_msgs'] = []
         workers = db_api.get_workers(context.user_data['reg_fio'])
+        if context.user_data['reg_fio'].find('ё') > -1:
+            context.user_data['reg_fio'] = context.user_data['reg_fio'].replace('ё', 'е')
+            workers = workers + db_api.get_workers(context.user_data['reg_fio']) 
         if len(workers) > 0:
-            msg = await context.bot.send_message(chat_id=ADMIN_ID, text="Вот кого я нашел по ФИО:")
+            msg = await context.bot.send_message(chat_id=query.from_user.id, text="Вот кого я нашел по ФИО:")
             context.user_data['reg_workers_msgs'].append(msg.id)
             for worker in workers:
                 keyboard = [
@@ -129,7 +148,7 @@ async def register_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                         ]
                 ]
                 reply_markup = InlineKeyboardMarkup(keyboard)
-                msg = await context.bot.send_message(chat_id=ADMIN_ID, text=f"""id: {worker['id']}
+                msg = await context.bot.send_message(chat_id=query.from_user.id, text=f"""id: {worker['id']}
 ФИО: {worker['fio']}
 ТУ: {worker['tu']}
 Телефоны: {worker['phone']}""", reply_markup=reply_markup)
@@ -141,16 +160,23 @@ async def register_button(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 ]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
-            await context.bot.edit_message_reply_markup(chat_id=ADMIN_ID, message_id=context.user_data['reg_workers_msgs'][-1], reply_markup=reply_markup)
+            await context.bot.edit_message_reply_markup(chat_id=query.from_user.id, message_id=context.user_data['reg_workers_msgs'][-1], reply_markup=reply_markup)
             return WORKER_CHOICE
         else:
-            await context.bot.send_message(chat_id=ADMIN_ID, text="По указанным ФИО в БД работников никого не найдено")
-            return ConversationHandler.END
+            keyboard = [
+                [
+                    InlineKeyboardButton("Ввести id вручную", callback_data=f"worker_not_found")
+                ]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await context.bot.send_message(chat_id=query.from_user.id, text="По указанным ФИО в БД работников никого не найдено", reply_markup=reply_markup)
+            return WORKER_NOT_FOUND
     else:
         return ConversationHandler.END
 
 async def choose_worker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
+    await query.answer()
     if len(query.data.split('_')) == 2:
         worker_id = query.data.split('_')[1]
         db_api.set_worker(context.user_data['reg_user_id'], worker_id)
@@ -158,20 +184,19 @@ async def choose_worker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         text = f"""Пользователь id {context.user_data['reg_user_id']} зарегистрирован
 Связан с работником:
 {query.message.text}"""
-        await context.bot.edit_message_text(chat_id=ADMIN_ID, message_id=context.user_data['reg_message_id'], text=text)
+        await context.bot.edit_message_text(chat_id=ACCEPTANCE_GROUP, message_id=context.user_data['reg_message_id'], text=text)
         for msg in context.user_data['reg_workers_msgs']:
-            await context.bot.delete_message(chat_id=ADMIN_ID, message_id=msg)
+            await context.bot.delete_message(chat_id=query.from_user.id, message_id=msg)
         context.user_data.pop('reg_workers_msgs')
         context.user_data.pop('reg_fio')
         context.user_data.pop('reg_user_id')
         context.user_data.pop('reg_message_id')
         return ConversationHandler.END
     else:
-        await context.bot.send_message(chat_id=ADMIN_ID, text="Введите id работника вручную: ")
+        await context.bot.send_message(chat_id=query.from_user.id, text="Введите id работника вручную: ")
         return WORKER_NOT_FOUND
 
 async def assign_worker_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
     worker_id = int(update.message.text)
     logger.info(worker_id)
     worker = db_api.get_worker_by_id(worker_id)
@@ -184,9 +209,9 @@ id: {worker['id']}
 ФИО: {worker['fio']}
 ТУ: {worker['tu']}
 Телефоны: {worker['phone']}"""
-        await context.bot.edit_message_text(chat_id=ADMIN_ID, message_id=context.user_data['reg_message_id'], text=text)
+        await context.bot.edit_message_text(chat_id=ACCEPTANCE_GROUP, message_id=context.user_data['reg_message_id'], text=text)
         for msg in context.user_data['reg_workers_msgs']:
-            await context.bot.delete_message(chat_id=ADMIN_ID, message_id=msg)
+            await context.bot.delete_message(chat_id=update.message.from_user.id, message_id=msg)
         context.user_data.pop('reg_workers_msgs')
         context.user_data.pop('reg_fio')
         context.user_data.pop('reg_user_id')
@@ -199,8 +224,8 @@ id: {worker['id']}
             ]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.message.edit_reply_markup(reply_markup=reply_markup)
-        await context.bot.send_message(chat_id=ADMIN_ID, text="Работников с таким id не найдено! Регистрация не завершена")
+        await update.message.edit_reply_markup(reply_markup=reply_markup)
+        await context.bot.send_message(chat_id=ACCEPTANCE_GROUP, text="Работников с таким id не найдено! Регистрация не завершена")
     return ConversationHandler.END
 
 async def reject_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -221,6 +246,21 @@ async def wallet_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             f"Вам доступно для начисления {engines} движков до конца месяца.")
     await query.message.edit_reply_markup()
 
+async def wallet_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user = update.message.from_user
+    user_status = db_api.getUserStatus(user.id)
+    if user_status:
+        if user_status == 'active':
+            engines = db_api.get_wallet(int(user.id))
+            await context.bot.send_message(chat_id=user.id, text=
+                f"Вам доступно для начисления {engines} движков до конца месяца.")
+        else:
+            await context.bot.send_message(chat_id=user.id, text=
+                f"Ваша учетная запись не авторизована. Попробуйте позже, или свяжитесь с администратором.")
+    else:
+        await context.bot.send_message(chat_id=user.id, text=
+            f"Похоже, Вы еще зарегистрированы. Попробуйте начать с команды /start")
+
 async def balance_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
@@ -229,6 +269,21 @@ async def balance_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await context.bot.send_message(chat_id=user.id, text=
             f"Ваш баланс: {engines} движков")
     await query.message.edit_reply_markup()
+
+async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user = update.message.from_user
+    user_status = db_api.getUserStatus(user.id)
+    if user_status:
+        if user_status == 'active':
+            engines = db_api.get_engines(int(user.id))
+            await context.bot.send_message(chat_id=user.id, text=
+                f"Ваш баланс: {engines} движков")
+        else:
+            await context.bot.send_message(chat_id=user.id, text=
+                f"Ваша учетная запись не авторизована. Попробуйте позже, или свяжитесь с администратором.")
+    else:
+        await context.bot.send_message(chat_id=user.id, text=
+            f"Похоже, Вы еще зарегистрированы. Попробуйте начать с команды /start")
 
 async def stats_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
@@ -260,7 +315,6 @@ async def cancel_cbq(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         context.user_data.pop(key)
     return ConversationHandler.END
 
-
 async def give_start_cbq(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
@@ -273,9 +327,8 @@ async def give_start_cbq(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 "К сожалению, в этом месяце вы исчерпали все доступные для начисления движки :(")
         return ConversationHandler.END
         
-
 async def give_start_cmnd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user = update.message.from_user
+    user = update.message.from_user 
     engines = db_api.get_wallet(int(user.id))
     if engines > 0:
         return await give_start(user.id, update, context)
@@ -285,8 +338,18 @@ async def give_start_cmnd(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return ConversationHandler.END
 
 async def give_start(user_id, update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user_status = db_api.getUserStatus(user_id)
+    if user_status:
+        if user_status != 'active':
+            await context.bot.send_message(chat_id=user_id, text=
+                f"Ваша учетная запись не авторизована. Попробуйте позже, или свяжитесь с администратором.")
+            return ConversationHandler.END
+    else:
+        await context.bot.send_message(chat_id=user_id, text=
+            f"Похоже, Вы еще зарегистрированы. Попробуйте начать с команды /start")
+        return ConversationHandler.END
     await context.bot.send_message(chat_id=user_id, text=
-            "Кого бы вы хотели поощрить? Введите строку для поиска:")
+            "Кого бы вы хотели поощрить? Введите ФИО коллеги:")
     return GIVE_SEARCH
 
 async def give_search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -368,8 +431,21 @@ async def give_choose_reason(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.message.edit_text(text=new_text, reply_markup=None)
     return ConversationHandler.END
 
-async def init(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    db_api.init_tu()
+async def msg(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user = update.message.from_user
+    f = open('uninformed')
+    for l in f:
+        await context.bot.send_message(chat_id=int(l.strip()), text="Ваше участие подтверждено. Добро пожаловать в программу! Приносим извинения за задержку в уведомлении.")
+        logger.info(f'Message sent to: {l.strip()}')
+
+async def reset_wallets(context: ContextTypes.DEFAULT_TYPE) -> None:
+    db_api.reset_wallets(30);
+    await context.bot.send_message(chat_id=ADMIN_ID, text='Движки, доступные для начислений, восстановлены у всех пользователей')
+
+async def botstat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_chat.id 
+    result = db_api.get_bot_stats();
+    await context.bot.send_message(chat_id=user, text=result, parse_mode='HTML')
 
 def main() -> None:
 
@@ -385,14 +461,16 @@ def main() -> None:
             },
             fallbacks=[CommandHandler("cancel", cancel)]
     )
+    
     register_handler = ConversationHandler(
-            entry_points=[CallbackQueryHandler(register_button, pattern='^register_.*')],
-            states={
-                WORKER_CHOICE: [CallbackQueryHandler(choose_worker, pattern='^worker_.*')],
-                WORKER_NOT_FOUND: [MessageHandler(filters.Regex("^\d+$"), assign_worker_id)]
-            },
-            fallbacks=[]
-    )
+        entry_points=[CallbackQueryHandler(register_button, pattern='^register_.*')],
+        states={
+            WORKER_CHOICE: [CallbackQueryHandler(choose_worker, pattern='^worker_.*')],
+            WORKER_NOT_FOUND: [MessageHandler(filters.Regex("^\d+$") & ~filters.COMMAND, assign_worker_id)]
+        },
+        fallbacks=[CommandHandler("cancel", cancel)]
+    , per_chat=False)
+        
     give_handler = ConversationHandler(
             entry_points=[
                 CommandHandler("give", give_start_cmnd),
@@ -411,6 +489,8 @@ def main() -> None:
     reject_handler = CallbackQueryHandler(reject_button, pattern='^reject_.*')
     wallet_handler = CallbackQueryHandler(wallet_button, pattern='^wallet$')
     balance_handler = CallbackQueryHandler(balance_button, pattern='^balance$')
+    wallet_command_handler = CommandHandler('wallet', wallet_command)
+    balance_command_handler = CommandHandler('balance', balance_command)
     stats_handler = CallbackQueryHandler(stats_button, pattern='^stats$')
     application.add_handler(start_handler)
     application.add_handler(register_handler)
@@ -418,9 +498,13 @@ def main() -> None:
     application.add_handler(reject_handler)
     application.add_handler(wallet_handler)
     application.add_handler(balance_handler)
+    application.add_handler(wallet_command_handler)
+    application.add_handler(balance_command_handler)
     application.add_handler(stats_handler)
-    #init_handler = CommandHandler("init", init)
-    #application.add_handler(init_handler)
+    bot_stats_command_handler = CommandHandler('botstat', botstat)
+    application.add_handler(bot_stats_command_handler)
+    time_at = datetime.time(hour=0, minute=0, second=0)
+    application.job_queue.run_monthly(reset_wallets, time_at, 1, name='wallet_resetter')
     application.run_polling()
 
 if __name__ == "__main__":

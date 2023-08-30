@@ -1,5 +1,5 @@
 from sqlalchemy import create_engine, MetaData, Table, Integer, String, \
-        Column, DateTime, ForeignKey, Numeric, Text
+        Column, DateTime, ForeignKey, Numeric, Text, func
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship, Session, sessionmaker
 from datetime import datetime
@@ -121,7 +121,10 @@ def reject_user(user):
 
 def get_user_by_worker_id(worker_id):
     user = session.query(Users).filter(Users.worker_id == worker_id).first()
-    return user.id
+    if user:
+        return user.id
+    else:
+        return None
 
 def get_workers(fio):
     found_workers = session.query(Workers.id, Workers.fio, Workers.phone, TU.phone_code, TU.name).filter(Workers.fio.like(f"%{fio}%")).join(TU).all()
@@ -204,10 +207,6 @@ def give_engines(user_id, worker_id, reason_id):
     reason = session.query(Reasons).filter(Reasons.id == reason_id).first()
     if user.worker_id == worker_id:
         return [False, 'Нельзя начислить движки самому себе!']
-    user.wallet = user.wallet - 10
-    session.add(user)
-    worker.engines = worker.engines + 10
-    session.add(worker)
     today = datetime.today()
     mon_transactions = session.query(Transactions).filter(
             Transactions.from_user == user_id, 
@@ -216,6 +215,10 @@ def give_engines(user_id, worker_id, reason_id):
     ).count()
     if mon_transactions > 0:
         return [False, 'Нельзя начислять движки коллеге дважды в течение месяца!']
+    user.wallet = user.wallet - 10
+    session.add(user)
+    worker.engines = worker.engines + 10
+    session.add(worker)
     transaction = Transactions(
         date = today.day, 
         month = today.month,
@@ -247,3 +250,19 @@ def import_tu(code):
         )
         session.add(worker)
         session.commit()
+
+def reset_wallets(count):
+    session.query(Users).update({Users.wallet: count})
+    session.commit()
+
+def get_bot_stats():
+    result = 'Статистика бота Горизонт:\n'
+    active_users_count = session.query(Users).filter(Users.status == 'active').count()
+    result += f'Активных пользователей: {active_users_count}\n'
+    max_engines = session.query(func.max(Workers.engines)).scalar()
+    result += f'Максимальное количество движков: {max_engines}\n'
+    total_granted = session.query(Workers).filter(Workers.engines > 0).count()
+    result += f'Общее количество работников с начисленными движками: {total_granted}\n'
+    total_engines = session.query(func.sum(Workers.engines)).scalar()
+    result += f'Общее количество движков на балансе: {total_engines}'
+    return result
